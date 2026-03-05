@@ -1,42 +1,134 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { useDispatch, useSelector } from 'react-redux';
 import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
-// Temporary placeholder components until we create the full ones
-const Login = () => <div className="p-8 text-center">Login Page (Coming Soon)</div>;
-const Register = () => <div className="p-8 text-center">Register Page (Coming Soon)</div>;
-const Dashboard = () => <div className="p-8 text-center">Dashboard (Coming Soon)</div>;
+// Layout Components
+import Navbar from './components/layout/Navbar';
+import Sidebar from './components/layout/Sidebar';
+import PrivateRoute from './components/routing/PrivateRoute';
+import AdminRoute from './components/routing/AdminRoute';
+
+// Pages
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Dashboard from './pages/Dashboard';
+import StockMarket from './pages/StockMarket';
+import StockDetails from './pages/StockDetails';
+import Portfolio from './pages/Portfolio';
+import Transactions from './pages/Transactions';
+import Watchlist from './pages/Watchlist';
+import AdminDashboard from './pages/admin/AdminDashboard';
+import AdminStocks from './pages/admin/AdminStocks';
+import AdminUsers from './pages/admin/AdminUsers';
+
+// Redux
+import { loadUser } from './redux/slices/authSlice';
+import { initializeSocket } from './services/socket';
 
 function App() {
+  const dispatch = useDispatch();
+  const { isAuthenticated, user, isLoading } = useSelector(state => state.auth);
+
+  // Load user only once when app starts
+  useEffect(() => {
+    if (localStorage.getItem('token')) {
+      dispatch(loadUser());
+    }
+  }, [dispatch]);
+
+  // Initialize socket only when authenticated
+  useEffect(() => {
+    if (isAuthenticated && user) {
+      initializeSocket(user.token);
+    }
+  }, [isAuthenticated, user]);
+
+  // Show loading spinner while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
   return (
     <Router>
-      <div className="min-h-screen bg-gray-100">
-        <nav className="bg-indigo-600 text-white shadow-lg">
-          <div className="container mx-auto px-4">
-            <div className="flex justify-between items-center h-16">
-              <div className="text-xl font-bold">SB Stocks</div>
-              <div className="space-x-4">
-                <button className="bg-indigo-700 px-4 py-2 rounded-md hover:bg-indigo-800">
-                  Login
-                </button>
-                <button className="bg-indigo-500 px-4 py-2 rounded-md hover:bg-indigo-600">
-                  Register
-                </button>
-              </div>
-            </div>
-          </div>
-        </nav>
-        
-        <div className="container mx-auto px-4 py-8">
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
-            <Route path="/" element={<Dashboard />} />
-          </Routes>
+      <div className="min-h-screen bg-gray-50">
+        {isAuthenticated && <Navbar />}
+        <div className="flex">
+          {isAuthenticated && <Sidebar />}
+          <main className={`flex-1 ${isAuthenticated ? 'p-6' : ''}`}>
+            <Routes>
+              {/* Public Routes - only accessible when NOT authenticated */}
+              <Route 
+                path="/login" 
+                element={!isAuthenticated ? <Login /> : <Navigate to="/" />} 
+              />
+              <Route 
+                path="/register" 
+                element={!isAuthenticated ? <Register /> : <Navigate to="/" />} 
+              />
+              
+              {/* Private Routes - only accessible when authenticated */}
+              <Route 
+                path="/" 
+                element={<PrivateRoute><Dashboard /></PrivateRoute>} 
+              />
+              <Route 
+                path="/stocks" 
+                element={<PrivateRoute><StockMarket /></PrivateRoute>} 
+              />
+              <Route 
+                path="/stocks/:symbol" 
+                element={<PrivateRoute><StockDetails /></PrivateRoute>} 
+              />
+              <Route 
+                path="/portfolio" 
+                element={<PrivateRoute><Portfolio /></PrivateRoute>} 
+              />
+              <Route 
+                path="/transactions" 
+                element={<PrivateRoute><Transactions /></PrivateRoute>} 
+              />
+              <Route 
+                path="/watchlist" 
+                element={<PrivateRoute><Watchlist /></PrivateRoute>} 
+              />
+              
+              {/* Admin Routes */}
+              <Route 
+                path="/admin" 
+                element={<AdminRoute><AdminDashboard /></AdminRoute>} 
+              />
+              <Route 
+                path="/admin/stocks" 
+                element={<AdminRoute><AdminStocks /></AdminRoute>} 
+              />
+              <Route 
+                path="/admin/users" 
+                element={<AdminRoute><AdminUsers /></AdminRoute>} 
+              />
+              
+              {/* Catch all - redirect to home */}
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </main>
         </div>
-        
-        <ToastContainer position="bottom-right" autoClose={3000} />
+        <ToastContainer 
+          position="bottom-right"
+          autoClose={3000}
+          hideProgressBar={false}
+          newestOnTop
+          closeOnClick
+          rtl={false}
+          pauseOnFocusLoss
+          draggable
+          pauseOnHover
+          theme="light"
+        />
       </div>
     </Router>
   );

@@ -3,16 +3,23 @@ const router = express.Router();
 const {
   getStocks,
   getStockBySymbol,
-  updateStockPrice,
+  getStockHistory,
+  getMarketMovers,
+  searchStocks,
+  updateStock,
   fetchStockData
 } = require('../controllers/stockController');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, admin } = require('../middleware/auth');
 
-router.route('/')
-  .get(getStocks)
-  .post(protect, authorize('admin'), fetchStockData);
-
+// Public routes
+router.get('/', getStocks);
+router.get('/search/:query', searchStocks);
+router.get('/movers/:type', getMarketMovers);
 router.get('/:symbol', getStockBySymbol);
-router.put('/:id', protect, authorize('admin'), updateStockPrice);
+router.get('/:symbol/history', getStockHistory);
+
+// Admin only routes
+router.put('/:id', protect, admin, updateStock);
+router.post('/fetch', protect, admin, fetchStockData);
 
 module.exports = router;

@@ -8,8 +8,16 @@ const User = require('../models/User');
 // @access  Private
 const buyStock = async (req, res) => {
   try {
-    const { stockId, quantity } = req.body;
+    const { stockId, quantity, orderType = 'MARKET', limitPrice, stopPrice } = req.body;
     const userId = req.user.id;
+
+    // Validate quantity
+    if (quantity <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Quantity must be greater than 0' 
+      });
+    }
 
     // Get stock details
     const stock = await Stock.findById(stockId);
@@ -20,34 +28,59 @@ const buyStock = async (req, res) => {
       });
     }
 
-    const totalCost = stock.currentPrice * quantity;
+    // Determine execution price
+    let executionPrice = stock.currentPrice;
+    if (orderType === 'LIMIT' && limitPrice) {
+      if (stock.currentPrice > limitPrice) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Limit price not met' 
+        });
+      }
+      executionPrice = limitPrice;
+    }
+
+    const totalCost = executionPrice * quantity;
 
     // Check user balance
     const user = await User.findById(userId);
     if (user.virtualBalance < totalCost) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Insufficient balance' 
+        message: `Insufficient balance. Required: $${totalCost.toFixed(2)}, Available: $${user.virtualBalance.toFixed(2)}` 
       });
     }
 
+    // Create transaction
+    const transaction = await Transaction.create({
+      user: userId,
+      stock: stockId,
+      type: 'BUY',
+      quantity,
+      price: executionPrice,
+      totalAmount: totalCost,
+      orderType,
+      limitPrice,
+      stopPrice,
+      status: 'COMPLETED'
+    });
+
     // Update user balance
     user.virtualBalance -= totalCost;
+    user.tradesCount += 1;
+    user.totalInvested += totalCost;
     await user.save();
 
-    // Get or create portfolio
+    // Update portfolio
     let portfolio = await Portfolio.findOne({ user: userId });
     if (!portfolio) {
       portfolio = await Portfolio.create({
         user: userId,
-        holdings: [],
-        totalValue: 0,
-        totalProfitLoss: 0,
-        dayProfitLoss: 0
+        cashBalance: user.virtualBalance
       });
     }
 
-    // Update portfolio holdings
+    // Find existing holding
     const holdingIndex = portfolio.holdings.findIndex(
       h => h.stock.toString() === stockId
     );
@@ -59,7 +92,7 @@ const buyStock = async (req, res) => {
       const newTotalInvestment = holding.totalInvestment + totalCost;
       
       portfolio.holdings[holdingIndex] = {
-        ...holding,
+        ...holding.toObject(),
         quantity: newQuantity,
         averageBuyPrice: newTotalInvestment / newQuantity,
         totalInvestment: newTotalInvestment
@@ -69,35 +102,40 @@ const buyStock = async (req, res) => {
       portfolio.holdings.push({
         stock: stockId,
         quantity,
-        averageBuyPrice: stock.currentPrice,
+        averageBuyPrice: executionPrice,
         totalInvestment: totalCost
       });
     }
 
-    // Update portfolio total value
-    portfolio.totalValue += totalCost;
+    portfolio.cashBalance = user.virtualBalance;
     await portfolio.save();
 
-    // Create transaction record
-    const transaction = await Transaction.create({
-      user: userId,
-      stock: stockId,
+    // Populate stock details
+    await transaction.populate('stock', 'symbol companyName');
+
+    // Emit real-time update
+    const io = req.app.get('io');
+    io.to(`user-${userId}`).emit('transactionUpdate', {
       type: 'BUY',
-      quantity,
-      price: stock.currentPrice,
-      totalAmount: totalCost
+      transaction,
+      newBalance: user.virtualBalance
     });
 
     res.status(201).json({
       success: true,
+      message: `Successfully bought ${quantity} shares of ${stock.symbol}`,
       data: {
         transaction,
-        balance: user.virtualBalance,
+        newBalance: user.virtualBalance,
         portfolio
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Buy stock error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to buy stock' 
+    });
   }
 };
 
@@ -106,8 +144,16 @@ const buyStock = async (req, res) => {
 // @access  Private
 const sellStock = async (req, res) => {
   try {
-    const { stockId, quantity } = req.body;
+    const { stockId, quantity, orderType = 'MARKET', limitPrice, stopPrice } = req.body;
     const userId = req.user.id;
+
+    // Validate quantity
+    if (quantity <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Quantity must be greater than 0' 
+      });
+    }
 
     // Get stock details
     const stock = await Stock.findById(stockId);
@@ -135,15 +181,47 @@ const sellStock = async (req, res) => {
     if (!holding || holding.quantity < quantity) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Insufficient shares' 
+        message: `Insufficient shares. You own ${holding?.quantity || 0} shares` 
       });
     }
 
-    const totalAmount = stock.currentPrice * quantity;
+    // Determine execution price
+    let executionPrice = stock.currentPrice;
+    if (orderType === 'LIMIT' && limitPrice) {
+      if (stock.currentPrice < limitPrice) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Limit price not met' 
+        });
+      }
+      executionPrice = limitPrice;
+    }
+
+    const totalAmount = executionPrice * quantity;
+
+    // Create transaction
+    const transaction = await Transaction.create({
+      user: userId,
+      stock: stockId,
+      type: 'SELL',
+      quantity,
+      price: executionPrice,
+      totalAmount,
+      orderType,
+      limitPrice,
+      stopPrice,
+      status: 'COMPLETED'
+    });
+
+    // Update user balance
+    const user = await User.findById(userId);
+    user.virtualBalance += totalAmount;
+    user.tradesCount += 1;
+    await user.save();
 
     // Update portfolio
     holding.quantity -= quantity;
-    holding.totalInvestment = (holding.averageBuyPrice * holding.quantity);
+    holding.totalInvestment = holding.averageBuyPrice * holding.quantity;
 
     if (holding.quantity === 0) {
       // Remove holding if quantity becomes 0
@@ -152,34 +230,40 @@ const sellStock = async (req, res) => {
       );
     }
 
-    portfolio.totalValue -= totalAmount;
+    portfolio.cashBalance = user.virtualBalance;
     await portfolio.save();
 
-    // Update user balance
-    const user = await User.findById(userId);
-    user.virtualBalance += totalAmount;
-    await user.save();
+    // Populate stock details
+    await transaction.populate('stock', 'symbol companyName');
 
-    // Create transaction record
-    const transaction = await Transaction.create({
-      user: userId,
-      stock: stockId,
+    // Calculate profit/loss
+    const profitLoss = await transaction.calculateProfitLoss();
+
+    // Emit real-time update
+    const io = req.app.get('io');
+    io.to(`user-${userId}`).emit('transactionUpdate', {
       type: 'SELL',
-      quantity,
-      price: stock.currentPrice,
-      totalAmount
+      transaction,
+      profitLoss,
+      newBalance: user.virtualBalance
     });
 
     res.json({
       success: true,
+      message: `Successfully sold ${quantity} shares of ${stock.symbol}`,
       data: {
         transaction,
-        balance: user.virtualBalance,
+        profitLoss,
+        newBalance: user.virtualBalance,
         portfolio
       }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Sell stock error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to sell stock' 
+    });
   }
 };
 
@@ -188,21 +272,116 @@ const sellStock = async (req, res) => {
 // @access  Private
 const getUserTransactions = async (req, res) => {
   try {
-    const transactions = await Transaction.find({ user: req.user.id })
+    const { page = 1, limit = 20, type, symbol } = req.query;
+    const query = { user: req.user.id };
+
+    if (type) {
+      query.type = type;
+    }
+
+    if (symbol) {
+      const stocks = await Stock.find({ 
+        symbol: { $regex: symbol, $options: 'i' } 
+      });
+      query.stock = { $in: stocks.map(s => s._id) };
+    }
+
+    const transactions = await Transaction.find(query)
       .populate('stock', 'symbol companyName')
-      .sort('-timestamp');
+      .sort('-createdAt')
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    const total = await Transaction.countDocuments(query);
 
     res.json({
       success: true,
-      data: transactions
+      data: transactions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('Get transactions error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch transactions' 
+    });
+  }
+};
+
+// @desc    Get single transaction
+// @route   GET /api/transactions/:id
+// @access  Private
+const getTransaction = async (req, res) => {
+  try {
+    const transaction = await Transaction.findOne({
+      _id: req.params.id,
+      user: req.user.id
+    }).populate('stock', 'symbol companyName sector');
+
+    if (!transaction) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Transaction not found' 
+      });
+    }
+
+    res.json({
+      success: true,
+      data: transaction
+    });
+  } catch (error) {
+    console.error('Get transaction error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch transaction' 
+    });
+  }
+};
+
+// @desc    Cancel pending transaction
+// @route   PUT /api/transactions/:id/cancel
+// @access  Private
+const cancelTransaction = async (req, res) => {
+  try {
+    const transaction = await Transaction.findOne({
+      _id: req.params.id,
+      user: req.user.id,
+      status: 'PENDING'
+    });
+
+    if (!transaction) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Pending transaction not found' 
+      });
+    }
+
+    transaction.status = 'CANCELLED';
+    await transaction.save();
+
+    res.json({
+      success: true,
+      message: 'Transaction cancelled successfully',
+      data: transaction
+    });
+  } catch (error) {
+    console.error('Cancel transaction error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to cancel transaction' 
+    });
   }
 };
 
 module.exports = {
   buyStock,
   sellStock,
-  getUserTransactions
+  getUserTransactions,
+  getTransaction,
+  cancelTransaction
 };
